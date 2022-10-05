@@ -16,7 +16,7 @@
   "gnetId": null,
   "graphTooltip": 0,
   "id": 3,
-  "iteration": 1664996499154,
+  "iteration": 1664996908211,
   "links": [],
   "panels": [
     {
@@ -30,7 +30,7 @@
       },
       "id": 14,
       "panels": [],
-      "title": "Ray Dashboard Metrics",
+      "title": "Ray Dashboard Metrics!!!!!",
       "type": "row"
     },
     {
@@ -274,7 +274,7 @@
       "targets": [
         {
           "exemplar": true,
-          "expr": "ray_node_cpu_utilization{instance=~\"$Instance\",cluster_id=\"$cluster_id\"}",
+          "expr": "ray_node_cpu_utilization{instance=~\"$Instance\",cluster_id=\"$cluster_id\"} * ray_node_cpu_count{instance=~\"$Instance\",cluster_id=\"$cluster_id\"} / 100",
           "instant": false,
           "interval": "",
           "legendFormat": "CPU Usage: {{instance}}",
@@ -310,7 +310,7 @@
       },
       "yaxes": [
         {
-          "$$hashKey": "object:120",
+          "$$hashKey": "object:42",
           "format": "cores",
           "label": null,
           "logBase": 1,
@@ -319,7 +319,7 @@
           "show": true
         },
         {
-          "$$hashKey": "object:121",
+          "$$hashKey": "object:43",
           "format": "short",
           "label": null,
           "logBase": 1,
