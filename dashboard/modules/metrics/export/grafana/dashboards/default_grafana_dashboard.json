@@ -15,7 +15,8 @@
   "editable": true,
   "gnetId": null,
   "graphTooltip": 0,
-  "iteration": 1664989121079,
+  "id": 3,
+  "iteration": 1664996499154,
   "links": [],
   "panels": [
     {
@@ -273,7 +274,7 @@
       "targets": [
         {
           "exemplar": true,
-          "expr": "ray_node_cpu_utilization{instance=~\"$Instance\",cluster_id=\"$cluster_id\"} * ray_node_cpu_count{instance=~\"$Instance\",cluster_id=\"$cluster_id\"} / 100",
+          "expr": "ray_node_cpu_utilization{instance=~\"$Instance\",cluster_id=\"$cluster_id\"}",
           "instant": false,
           "interval": "",
           "legendFormat": "CPU Usage: {{instance}}",
@@ -309,6 +310,7 @@
       },
       "yaxes": [
         {
+          "$$hashKey": "object:120",
           "format": "cores",
           "label": null,
           "logBase": 1,
@@ -317,6 +319,7 @@
           "show": true
         },
         {
+          "$$hashKey": "object:121",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -886,7 +889,7 @@
       {
         "allValue": null,
         "current": {
-          "selected": false,
+          "selected": true,
           "text": [
             "All"
           ],
