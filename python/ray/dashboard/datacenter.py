@@ -277,6 +277,7 @@ class DataOrganizer:
                         break
 
         actor["gpus"] = actor_process_gpu_stats
+        actor["node_has_gpus"] = len(node_physical_stats.get("gpus", [])) > 0
         actor["processStats"] = actor_process_stats
         actor["mem"] = node_physical_stats.get("mem", [])
 

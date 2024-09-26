@@ -244,6 +244,8 @@ export const WorkerRow = ({ node, worker }: WorkerRowProps) => {
     `/logs/?nodeId=${encodeURIComponent(nodeId)}` +
     (coreWorker ? `&fileName=${coreWorker.workerId}` : "");
 
+  const nodeHasGpus = (node.gpus?.length ?? 0) > 0;
+
   return (
     <TableRow>
       <TableCell>
@@ -299,10 +301,18 @@ export const WorkerRow = ({ node, worker }: WorkerRowProps) => {
         )}
       </TableCell>
       <TableCell>
-        <WorkerGpuRow workerPID={pid} gpus={node.gpus} />
+        <WorkerGpuRow
+          workerPID={pid}
+          gpus={node.gpus}
+          nodeHasGpus={nodeHasGpus}
+        />
       </TableCell>
       <TableCell>
-        <WorkerGRAM workerPID={pid} gpus={node.gpus} />
+        <WorkerGRAM
+          workerPID={pid}
+          gpus={node.gpus}
+          nodeHasGpus={nodeHasGpus}
+        />
       </TableCell>
       <TableCell>N/A</TableCell>
       <TableCell>N/A</TableCell>

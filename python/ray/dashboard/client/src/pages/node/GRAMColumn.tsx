@@ -33,9 +33,11 @@ export const NodeGRAM = ({ node }: { node: NodeDetail }) => {
 export const WorkerGRAM = ({
   workerPID,
   gpus,
+  nodeHasGpus = false,
 }: {
   workerPID: number | null;
   gpus?: GPUStats[];
+  nodeHasGpus?: boolean;
 }) => {
   const workerGRAMEntries = (gpus ?? [])
     .map((gpu, i) => {
@@ -58,7 +60,7 @@ export const WorkerGRAM = ({
 
   return workerGRAMEntries.length === 0 ? (
     <Typography color="textSecondary" component="span" variant="inherit">
-      N/A
+      {nodeHasGpus ? "Unattached" : "N/A"}
     </Typography>
   ) : (
     <div style={{ minWidth: GRAM_COL_WIDTH }}>{workerGRAMEntries}</div>

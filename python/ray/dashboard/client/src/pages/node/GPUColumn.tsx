@@ -48,9 +48,11 @@ export const NodeGPUView = ({ node }: { node: NodeDetail }) => {
 export const WorkerGpuRow = ({
   workerPID,
   gpus,
+  nodeHasGpus = false,
 }: {
   workerPID: number | null;
   gpus?: GPUStats[];
+  nodeHasGpus?: boolean;
 }) => {
   const workerGPUEntries = (gpus ?? [])
     .map((gpu, i) => {
@@ -66,7 +68,7 @@ export const WorkerGpuRow = ({
 
   return workerGPUEntries.length === 0 ? (
     <Typography color="textSecondary" component="span" variant="inherit">
-      N/A
+      {nodeHasGpus ? "Unattached" : "N/A"}
     </Typography>
   ) : (
     <Box sx={{ minWidth: 120 }}>{workerGPUEntries}</Box>

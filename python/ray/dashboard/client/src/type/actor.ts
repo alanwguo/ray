@@ -43,6 +43,7 @@ export type ActorDetail = {
   numLocalObjects: number;
   numObjectRefsInScope: number;
   gpus?: GPUStats[]; // GPU stats fetched from node, 1 entry per GPU
+  nodeHasGpus: boolean; // Whether the actor is running on a node with GPUs
   processStats: {
     cmdline: string[];
     cpuPercent: number;

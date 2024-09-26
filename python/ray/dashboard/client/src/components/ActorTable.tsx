@@ -547,6 +547,7 @@ const ActorTable = ({
                 exitDetail,
                 requiredResources,
                 gpus,
+                nodeHasGpus,
                 processStats,
                 mem,
               }) => (
@@ -677,10 +678,18 @@ const ActorTable = ({
                     )}
                   </TableCell>
                   <TableCell>
-                    <WorkerGpuRow workerPID={pid} gpus={gpus} />
+                    <WorkerGpuRow
+                      workerPID={pid}
+                      gpus={gpus}
+                      nodeHasGpus={nodeHasGpus}
+                    />
                   </TableCell>
                   <TableCell>
-                    <WorkerGRAM workerPID={pid} gpus={gpus} />
+                    <WorkerGRAM
+                      workerPID={pid}
+                      gpus={gpus}
+                      nodeHasGpus={nodeHasGpus}
+                    />
                   </TableCell>
                   <TableCell
                     align="center"
