@@ -65,6 +65,17 @@ Continue on for examples, or jump to the :ref:`OpenAPI specification <ray-job-re
     print(resp.json())
     # {"job_id": {"metadata": ..., "status": ..., "message": ...}, ...}
 
+**Stop job**
+
+.. code-block:: python
+
+    import requests
+    import json
+
+    resp = requests.post(
+        f"http://127.0.0.1:8265/api/jobs/{job_id}/stop"
+    )
+
 .. _ray-job-rest-api-spec:
 
 OpenAPI Documentation (Beta)
