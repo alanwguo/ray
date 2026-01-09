@@ -11,7 +11,7 @@ import aiohttp.web
 import ray.dashboard.consts as dashboard_consts
 import ray.dashboard.optional_utils as dashboard_optional_utils
 import ray.dashboard.utils as dashboard_utils
-from ray import NodeID
+from ray import ActorID, NodeID, WorkerID
 from ray._common.network_utils import build_address
 from ray._common.usage.usage_constants import CLUSTER_METADATA_KEY
 from ray._private.grpc_utils import init_grpc_channel
@@ -215,6 +215,124 @@ class ReportHead(SubprocessModule):
 
         return pid, worker_id
 
+    async def get_worker_id_from_pid(self, pid: int) -> Optional[str]:
+        """Retrieves the worker ID associated with a specific process ID.
+
+        Args:
+            pid: The process ID of the worker.
+
+        Returns:
+            Optional[str]: The worker ID if found, None otherwise.
+        """
+        if self._state_api is None:
+            raise ValueError("The state API is not initialized yet. Please retry.")
+
+        # Query workers table directly
+        option = ListApiOptions(
+            filters=[("pid", "=", pid)],
+            detail=True,
+            timeout=10,
+        )
+        result = await self._state_api.list_workers(option=option)
+        workers = result.result
+        if workers:
+            return workers[0].get("worker_id")
+
+        return None
+
+    async def get_actor_worker_id(self, actor_id: str) -> Optional[str]:
+        """Retrieves the worker ID associated with a specific actor.
+
+        Args:
+            actor_id: The ID of the actor.
+
+        Returns:
+            Optional[str]: The worker ID if the actor exists and has a worker, None otherwise.
+        """
+        if self._state_api is None:
+            raise ValueError("The state API is not initialized yet. Please retry.")
+
+        # Get the actor by ID
+        option = ListApiOptions(
+            filters=[("actor_id", "=", actor_id)],
+            detail=True,
+            timeout=10,
+        )
+        result = await self._state_api.list_actors(option=option)
+        actors = result.result
+
+        if not actors:
+            return None
+
+        actor = actors[0]
+
+        # Try to get worker_id from tasks first (more reliable)
+        option = ListApiOptions(
+            filters=[("actor_id", "=", actor_id), ("state", "=", "RUNNING")],
+            detail=True,
+            timeout=10,
+        )
+        result = await self._state_api.list_tasks(option=option)
+        tasks = result.result
+        if tasks:
+            # Get worker_id from the first task
+            return tasks[0].get("worker_id")
+
+        # If no tasks, try to get from GCS client directly
+        # The address field in the state API might not be decoded, so we use GCS
+        try:
+            actor_id_obj = ActorID.from_hex(actor_id)
+            # Use async_get_all_actor_info with actor_id filter
+            all_actors = await self.gcs_client.async_get_all_actor_info(
+                actor_id=actor_id_obj, timeout=GCS_RPC_TIMEOUT_SECONDS
+            )
+            if all_actors and actor_id_obj in all_actors:
+                actor_info = all_actors[actor_id_obj]
+                if actor_info and actor_info.address:
+                    worker_id_binary = actor_info.address.worker_id
+                    if worker_id_binary:
+                        worker_id_hex = WorkerID(worker_id_binary).hex()
+                        logger.debug(
+                            f"Got worker_id {worker_id_hex} for actor {actor_id} from GCS"
+                        )
+                        return worker_id_hex
+        except Exception as e:
+            logger.warning(f"Failed to get actor worker_id from GCS for {actor_id}: {e}")
+
+        return None
+
+    async def verify_worker_task_or_actor(
+        self,
+        worker_id: str,
+        expected_task_id: Optional[str] = None,
+        expected_actor_id: Optional[str] = None,
+    ) -> None:
+        """Verifies that a worker is running the expected task or actor.
+
+        Args:
+            worker_id: The ID of the worker to verify.
+            expected_task_id: Optional task ID that the worker should be running.
+            expected_actor_id: Optional actor ID that the worker should be associated with.
+
+        Raises:
+            ValueError: If the worker is not running the expected task or actor.
+        """
+        if expected_task_id is not None:
+            task_ids = await self.get_task_ids_running_in_a_worker(worker_id)
+            if expected_task_id not in task_ids:
+                raise ValueError(
+                    f"Worker {worker_id} is not running the expected task {expected_task_id}. "
+                    f"Currently running tasks: {task_ids}"
+                )
+
+        if expected_actor_id is not None:
+            # Get the worker_id for the expected actor and verify it matches
+            actor_worker_id = await self.get_actor_worker_id(expected_actor_id)
+            if actor_worker_id is None or actor_worker_id != worker_id:
+                raise ValueError(
+                    f"Expected actor {expected_actor_id} is not currently running on this worker."
+                )
+
     @routes.get("/task/traceback")
     async def get_task_traceback(
         self, req: aiohttp.web.Request
@@ -227,6 +345,7 @@ class ReportHead(SubprocessModule):
             task_id: The ID of the task.
             attempt_number: The attempt number of the task.
             node_id: The ID of the node.
+            expected_task_id: Optional. Verifies the worker is running the expected task and fails if not.
 
         Returns:
             aiohttp.web.Response: The HTTP response containing the traceback information.
@@ -235,6 +354,7 @@ class ReportHead(SubprocessModule):
             ValueError: If the "task_id" parameter is missing in the request query.
             ValueError: If the "attempt_number" parameter is missing in the request query.
             ValueError: If the worker begins working on another task during the traceback retrieval.
+            ValueError: If expected_task_id is provided and doesn't match the task_id.
             aiohttp.web.HTTPInternalServerError: If there is an internal server error during the traceback retrieval.
         """
         if "task_id" not in req.query:
@@ -247,6 +367,13 @@ class ReportHead(SubprocessModule):
         task_id = req.query.get("task_id")
         attempt_number = req.query.get("attempt_number")
         node_id_hex = req.query.get("node_id")
+        expected_task_id = req.query.get("expected_task_id")
+
+        # Verify expected_task_id matches task_id if provided
+        if expected_task_id is not None and expected_task_id != task_id:
+            raise ValueError(
+                f"expected_task_id {expected_task_id} does not match task_id {task_id}"
+            )
 
         addrs = await self._get_stub_address_by_node_id(NodeID.from_hex(node_id_hex))
         if not addrs:
@@ -260,11 +387,20 @@ class ReportHead(SubprocessModule):
         native = req.query.get("native", False) == "1"
 
         try:
-            (pid, _) = await self.get_worker_details_for_running_task(
+            (pid, worker_id) = await self.get_worker_details_for_running_task(
                 task_id, attempt_number
             )
         except ValueError as e:
             raise aiohttp.web.HTTPInternalServerError(text=str(e))
+
+        # Verify the worker is running the expected task if expected_task_id is provided
+        if expected_task_id is not None:
+            try:
+                await self.verify_worker_task_or_actor(
+                    worker_id, expected_task_id=expected_task_id
+                )
+            except ValueError as e:
+                raise aiohttp.web.HTTPInternalServerError(text=str(e))
 
         logger.info(
             "Sending stack trace request to {}:{} with native={}".format(
@@ -289,7 +425,6 @@ class ReportHead(SubprocessModule):
             (_, worker_id) = await self.get_worker_details_for_running_task(
                 task_id, attempt_number
             )
-
         except ValueError as e:
             raise aiohttp.web.HTTPInternalServerError(text=str(e))
         if not reply.success:
@@ -325,6 +460,7 @@ class ReportHead(SubprocessModule):
             ValueError: If the "attempt_number" parameter is missing in the request query.
             ValueError: If the maximum duration allowed is exceeded.
             ValueError: If the worker begins working on another task during the profile retrieval.
+            ValueError: If expected_task_id is provided and doesn't match the task_id.
             aiohttp.web.HTTPInternalServerError: If there is an internal server error during the profile retrieval.
             aiohttp.web.HTTPInternalServerError: If the CPU Flame Graph information for the task is not found.
         """
@@ -338,6 +474,13 @@ class ReportHead(SubprocessModule):
         task_id = req.query.get("task_id")
         attempt_number = req.query.get("attempt_number")
         node_id_hex = req.query.get("node_id")
+        expected_task_id = req.query.get("expected_task_id")
+
+        # Verify expected_task_id matches task_id if provided
+        if expected_task_id is not None and expected_task_id != task_id:
+            raise ValueError(
+                f"expected_task_id {expected_task_id} does not match task_id {task_id}"
+            )
 
         duration_s = int(req.query.get("duration", 5))
         if duration_s > 60:
@@ -355,11 +498,20 @@ class ReportHead(SubprocessModule):
         reporter_stub = self._make_stub(build_address(ip, grpc_port))
 
         try:
-            (pid, _) = await self.get_worker_details_for_running_task(
+            (pid, worker_id) = await self.get_worker_details_for_running_task(
                 task_id, attempt_number
             )
         except ValueError as e:
             raise aiohttp.web.HTTPInternalServerError(text=str(e))
+
+        # Verify the worker is running the expected task if expected_task_id is provided
+        if expected_task_id is not None:
+            try:
+                await self.verify_worker_task_or_actor(
+                    worker_id, expected_task_id=expected_task_id
+                )
+            except ValueError as e:
+                raise aiohttp.web.HTTPInternalServerError(text=str(e))
 
         logger.info(
             f"Sending CPU profiling request to {build_address(ip, grpc_port)}, pid {pid}, for {task_id} with native={native}"
@@ -414,11 +566,20 @@ class ReportHead(SubprocessModule):
         Params:
             pid: Required. The PID of the worker.
             ip or node_id: Required. The IP address or hex ID of the node.
+            expected_task_id: Optional. Verifies the worker is running the expected task and fails if not.
+            expected_actor_id: Optional. Verifies the worker is associated with the expected actor and fails if not.
 
+        Raises:
+            ValueError: If pid is not provided.
+            ValueError: If ip or node_id is not provided.
+            ValueError: If expected_task_id or expected_actor_id is provided and doesn't match.
+            aiohttp.web.HTTPInternalServerError: If there is an internal server error during the traceback retrieval.
         """
         pid = req.query.get("pid")
         ip = req.query.get("ip")
         node_id_hex = req.query.get("node_id")
+        expected_task_id = req.query.get("expected_task_id")
+        expected_actor_id = req.query.get("expected_actor_id")
         if not pid:
             raise ValueError("pid is required")
         if not node_id_hex and not ip:
@@ -441,6 +602,22 @@ class ReportHead(SubprocessModule):
 
         node_id, ip, http_port, grpc_port = addrs
         reporter_stub = self._make_stub(build_address(ip, grpc_port))
+
+        # Verify worker is running expected task/actor if provided
+        if expected_task_id is not None or expected_actor_id is not None:
+            pid_int = int(pid)
+            worker_id = await self.get_worker_id_from_pid(pid_int)
+            if worker_id is None:
+                raise aiohttp.web.HTTPInternalServerError(
+                    text=f"Failed to find worker_id for pid {pid_int}"
+                )
+            try:
+                await self.verify_worker_task_or_actor(
+                    worker_id, expected_task_id=expected_task_id, expected_actor_id=expected_actor_id
+                )
+            except ValueError as e:
+                raise aiohttp.web.HTTPInternalServerError(text=str(e))
+
         # Default not using `--native` for profiling
         native = req.query.get("native", False) == "1"
         logger.info(
@@ -466,16 +643,21 @@ class ReportHead(SubprocessModule):
             duration: Optional. Duration in seconds for profiling (default: 5, max: 60).
             format: Optional. Output format (default: "flamegraph").
             native: Optional. Whether to use native profiling (default: false).
+            expected_task_id: Optional. Verifies the worker is running the expected task and fails if not.
+            expected_actor_id: Optional. Verifies the worker is associated with the expected actor and fails if not.
 
         Raises:
             ValueError: If pid is not provided.
             ValueError: If ip or node_id is not provided.
             ValueError: If duration exceeds 60 seconds.
+            ValueError: If expected_task_id or expected_actor_id is provided and doesn't match.
             aiohttp.web.HTTPInternalServerError: If there is an internal server error during the profile retrieval.
         """
         pid = req.query.get("pid")
         ip = req.query.get("ip")
         node_id_hex = req.query.get("node_id")
+        expected_task_id = req.query.get("expected_task_id")
+        expected_actor_id = req.query.get("expected_actor_id")
         if not pid:
             raise ValueError("pid is required")
         if not node_id_hex and not ip:
@@ -498,6 +680,21 @@ class ReportHead(SubprocessModule):
 
         node_id, ip, http_port, grpc_port = addrs
         reporter_stub = self._make_stub(build_address(ip, grpc_port))
+
+        # Verify worker is running expected task/actor if provided
+        if expected_task_id is not None or expected_actor_id is not None:
+            pid_int = int(pid)
+            worker_id = await self.get_worker_id_from_pid(pid_int)
+            if worker_id is None:
+                raise aiohttp.web.HTTPInternalServerError(
+                    text=f"Failed to find worker_id for pid {pid_int}"
+                )
+            try:
+                await self.verify_worker_task_or_actor(
+                    worker_id, expected_task_id=expected_task_id, expected_actor_id=expected_actor_id
+                )
+            except ValueError as e:
+                raise aiohttp.web.HTTPInternalServerError(text=str(e))
 
         pid = int(pid)
         duration_s = int(req.query.get("duration", 5))
@@ -542,11 +739,14 @@ class ReportHead(SubprocessModule):
                 ip or node_id: Required. The IP address or hex ID of the node where the GPU training worker is running.
                 num_iterations: Number of training steps for profiling. Defaults to 4
                     This is the number of calls to the torch Optimizer.step().
+                expected_task_id: Optional. Verifies the worker is running the expected task and fails if not.
+                expected_actor_id: Optional. Verifies the worker is associated with the expected actor and fails if not.
 
         Returns:
             A redirect to the log API to download the GPU profiling trace file.
 
         Raises:
+            ValueError: If expected_task_id or expected_actor_id is provided and doesn't match.
             aiohttp.web.HTTPInternalServerError: if one of the following happens:
                 (1) The GPU profiling dependencies are not installed on the target node.
                 (2) The target node doesn't have GPUs.
@@ -559,6 +759,8 @@ class ReportHead(SubprocessModule):
         pid = req.query.get("pid")
         ip = req.query.get("ip")
         node_id_hex = req.query.get("node_id")
+        expected_task_id = req.query.get("expected_task_id")
+        expected_actor_id = req.query.get("expected_actor_id")
         if not pid:
             raise ValueError("pid is required")
         if not node_id_hex and not ip:
@@ -581,6 +783,21 @@ class ReportHead(SubprocessModule):
 
         node_id, ip, http_port, grpc_port = addrs
         reporter_stub = self._make_stub(build_address(ip, grpc_port))
+
+        # Verify worker is running expected task/actor if provided
+        if expected_task_id is not None or expected_actor_id is not None:
+            pid_int = int(pid)
+            worker_id = await self.get_worker_id_from_pid(pid_int)
+            if worker_id is None:
+                raise aiohttp.web.HTTPInternalServerError(
+                    text=f"Failed to find worker_id for pid {pid_int}"
+                )
+            try:
+                await self.verify_worker_task_or_actor(
+                    worker_id, expected_task_id=expected_task_id, expected_actor_id=expected_actor_id
+                )
+            except ValueError as e:
+                raise aiohttp.web.HTTPInternalServerError(text=str(e))
 
         # Profile for num_iterations training steps (calls to optimizer.step())
         num_iterations = int(req.query.get("num_iterations", 4))
@@ -626,13 +843,17 @@ class ReportHead(SubprocessModule):
         Params (1):
             pid: The PID of the worker.
             ip or node_id: The IP address or hex ID of the node.
+            expected_task_id: Optional. Verifies the worker is running the expected task and fails if not.
+            expected_actor_id: Optional. Verifies the worker is associated with the expected actor and fails if not.
 
         Params (2):
             task_id: The ID of the task.
             attempt_number: The attempt number of the task.
             node_id: The ID of the node.
+            expected_task_id: Optional. Verifies the worker is running the expected task and fails if not.
 
         Raises:
+            ValueError: If expected_task_id or expected_actor_id is provided and doesn't match.
             aiohttp.web.HTTPInternalServerError: If no stub
                 found from the given IP address or hex ID value
             aiohttp.web.HTTPInternalServerError: If the
@@ -647,6 +868,8 @@ class ReportHead(SubprocessModule):
                 an internal server error during the profile retrieval.
         """
         is_task = "task_id" in req.query
+        expected_task_id = req.query.get("expected_task_id")
+        expected_actor_id = req.query.get("expected_actor_id")
 
         # Either is_task or not, we need to get ip and grpc_port.
         if is_task:
@@ -667,12 +890,29 @@ class ReportHead(SubprocessModule):
 
             task_id = req.query.get("task_id")
             attempt_number = req.query.get("attempt_number")
+
+            # Verify expected_task_id matches task_id if provided
+            if expected_task_id is not None and expected_task_id != task_id:
+                raise ValueError(
+                    f"expected_task_id {expected_task_id} does not match task_id {task_id}"
+                )
+
             try:
-                (pid, _) = await self.get_worker_details_for_running_task(
+                (pid, worker_id) = await self.get_worker_details_for_running_task(
                     task_id, attempt_number
                 )
             except ValueError as e:
                 raise aiohttp.web.HTTPInternalServerError(text=str(e))
+
+            # Verify the worker is running the expected task if expected_task_id is provided
+            if expected_task_id is not None:
+                try:
+                    await self.verify_worker_task_or_actor(
+                        worker_id, expected_task_id=expected_task_id
+                    )
+                except ValueError as e:
+                    raise aiohttp.web.HTTPInternalServerError(text=str(e))
+
             node_id_hex = req.query.get("node_id")
             addrs = await self._get_stub_address_by_node_id(
                 NodeID.from_hex(node_id_hex)
@@ -706,6 +946,20 @@ class ReportHead(SubprocessModule):
                         text=f"Failed to execute: no agent address found for node IP {ip}"
                     )
                 _, ip, _, grpc_port = addrs
+
+            # Verify worker is running expected task/actor if provided
+            if expected_task_id is not None or expected_actor_id is not None:
+                worker_id = await self.get_worker_id_from_pid(pid)
+                if worker_id is None:
+                    raise aiohttp.web.HTTPInternalServerError(
+                        text=f"Failed to find worker_id for pid {pid}"
+                    )
+                try:
+                    await self.verify_worker_task_or_actor(
+                        worker_id, expected_task_id=expected_task_id, expected_actor_id=expected_actor_id
+                    )
+                except ValueError as e:
+                    raise aiohttp.web.HTTPInternalServerError(text=str(e))
 
         assert pid is not None
         ip_port = build_address(ip, grpc_port)
